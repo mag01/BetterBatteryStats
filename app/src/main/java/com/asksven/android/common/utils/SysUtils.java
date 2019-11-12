@@ -15,14 +15,13 @@
  */
 package com.asksven.android.common.utils;
 
-import java.util.List;
-
-import com.asksven.android.common.RootShell;
-import com.asksven.android.common.shellutils.Exec;
-import com.asksven.android.common.shellutils.ExecResult;
-
+import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.os.Build;
+
+import com.asksven.android.common.shellutils.Exec;
+import com.asksven.android.common.shellutils.ExecResult;
 
 /**
  * @author sven
@@ -61,7 +60,14 @@ public class SysUtils
 
 	public static boolean hasPackageUsageStatsPermission(Context context)
 	{
-		return wasPermissionGranted(context, android.Manifest.permission.PACKAGE_USAGE_STATS);
+		if (Build.VERSION.SDK_INT >= 21)
+		{
+            return wasPermissionGranted(context, android.Manifest.permission.PACKAGE_USAGE_STATS);
+		}
+		else
+		{
+			return true;
+		}
 	}
 
 	private static boolean wasPermissionGranted(Context context, String permission)

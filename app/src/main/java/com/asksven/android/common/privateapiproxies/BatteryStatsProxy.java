@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 asksven
+ * Copyright (C) 2011-2018 asksven
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,19 +24,13 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
 import android.annotation.SuppressLint;
-import android.app.ActivityManager;
-import android.app.ActivityManager.RunningAppProcessInfo;
-import android.app.ActivityManager.RunningTaskInfo;
 import android.content.Context;
-import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.content.pm.PackageManager.NameNotFoundException;
 import android.hardware.Sensor;
 import android.hardware.SensorManager;
 import android.os.Build;
@@ -47,7 +41,6 @@ import android.os.ParcelFileDescriptor;
 import android.os.Parcelable;
 import android.os.SystemClock;
 import android.provider.Settings;
-import android.util.ArrayMap;
 import android.util.Log;
 import android.util.SparseArray;
 
@@ -55,20 +48,20 @@ import com.asksven.android.common.CommonLogSettings;
 import com.asksven.android.common.nameutils.UidInfo;
 import com.asksven.android.common.nameutils.UidNameResolver;
 import com.asksven.android.common.utils.DateUtils;
-import com.asksven.android.system.AndroidVersion;
-
-
-
 
 
 /**
  * A proxy to the non-public API BatteryStats
  * @author sven
+ * P preview 2:         https://android.googlesource.com/platform/frameworks/base/+/android-p-preview-2/core/java/com/android/internal/app/IBatteryStats.aidl
+ *                      https://android.googlesource.com/platform/frameworks/base/+/android-p-preview-2/core/java/com/android/internal/os/BatteryStatsImpl.java
+ *                      https://android.googlesource.com/platform/frameworks/base/+/android-p-preview-2/core/java/android/os/BatteryStats.java
  * Oreo (SDK26-27):     http://androidxref.com/8.0.0_r4/xref/frameworks/base/core/java/com/android/internal/os/BatteryStatsImpl.java#106
  * Nougat (SDK25-26):   http://androidxref.com/7.1.2_r36/xref/frameworks/base/core/java/com/android/internal/os/BatteryStatsImpl.java
  * Marshmallow (DSK23): http://androidxref.com/6.0.1_r10/xref/frameworks/base/core/java/com/android/internal/os/BatteryStatsImpl.java#94
  * Lolipop (SDK21-22):  http://androidxref.com/5.1.1_r6/xref/frameworks/base/core/java/com/android/internal/os/BatteryStatsImpl.java#85
  * Kitkat: (SDK19):     http://androidxref.com/4.4.4_r1/xref/frameworks/base/core/java/com/android/internal/os/BatteryStatsImpl.java#75
+ *
  */
 public class BatteryStatsProxy
 {
@@ -76,6 +69,10 @@ public class BatteryStatsProxy
 	 * Instance of the BatteryStatsImpl
 	 */
 	private Object m_Instance = null;
+
+	private static String m_lastError = "";
+	private static boolean m_fallbackStats = false;
+
 	@SuppressWarnings("rawtypes")
 	private Class m_ClassDefinition = null;
 	
@@ -106,24 +103,62 @@ public class BatteryStatsProxy
 	
 	synchronized public static BatteryStatsProxy getInstance(Context ctx)
 	{
-		if (m_proxy == null)
-		{
-            if (Build.VERSION.SDK_INT >= 22)
-            {
-                m_proxy = new BatteryStatsProxy(ctx, true);
+
+	    try {
+            if ((m_proxy == null) || (m_proxy.m_Instance == null)) {
+                m_fallbackStats = false;
+                m_lastError = "";
+
+                if (Build.VERSION.SDK_INT >= 22) {
+                    m_proxy = new BatteryStatsProxy(ctx, true);
+                    // some devices, e.g. Samsung Galaxy S10 throw a Permission denied when reading the FileInputStream
+                    // if the instance could not be created try the old way
+                    if (m_proxy.m_Instance == null) {
+                        m_fallbackStats = true;
+                        m_proxy = new BatteryStatsProxy(ctx);
+                    }
+                } else {
+                    m_fallbackStats = false;
+                    m_proxy = new BatteryStatsProxy(ctx);
+                }
             }
-            else
-            {
+        }
+        catch (NullPointerException e)
+        {
+            if (Build.VERSION.SDK_INT >= 22) {
+                m_proxy = new BatteryStatsProxy(ctx, true);
+                // some devices, e.g. Samsung Galaxy S10 throw a Permission denied when reading the FileInputStream
+                // if the instance could not be created try the old way
+                if (m_proxy.m_Instance == null) {
+                    m_fallbackStats = true;
+                    m_proxy = new BatteryStatsProxy(ctx);
+                }
+            } else {
+                m_fallbackStats = false;
                 m_proxy = new BatteryStatsProxy(ctx);
             }
-		}
-		
+
+        }
 		return m_proxy;
 	}
 
+    public String getError()
+    {
+        return m_lastError;
+    }
+
+    public boolean isFallback()
+    {
+        return m_fallbackStats;
+    }
+
     public void invalidate()
 	{
-		m_proxy = null;
+//	    // if using fallback mode we try to not call batterinfo too often
+//	    if (!isFallback())
+//	    {
+            m_proxy = null;
+//        }
 	}
 	
     /**
@@ -166,119 +201,155 @@ public class BatteryStatsProxy
 				
 		try
 		{
-	          ClassLoader cl = context.getClassLoader();
-	          
-	          m_ClassDefinition = cl.loadClass("com.android.internal.os.BatteryStatsImpl");
-	          
-	          // get the IBinder to the "batteryinfo" service
-	          @SuppressWarnings("rawtypes")
-			  Class serviceManagerClass = cl.loadClass("android.os.ServiceManager");
-	          
-	          // parameter types
-	          @SuppressWarnings("rawtypes")
-			  Class[] paramTypesGetService= new Class[1];
-	          paramTypesGetService[0]= String.class;
-	          
-	          @SuppressWarnings("unchecked")
-			  Method methodGetService = serviceManagerClass.getMethod("getService", paramTypesGetService);
-	          
-	          String service = "";
-	          if (Build.VERSION.SDK_INT >= 19)
-	          {
-	        	  // kitkat and following
-	        	  service = "batterystats";
-	          }
-	          else
-	          {
-	        	  service = "batteryinfo";
-	          }
-	          // parameters
-	          Object[] paramsGetService= new Object[1];
-	          paramsGetService[0] = service;
-	          
-	          if (CommonLogSettings.DEBUG)
-	          {
-	        	  Log.i(TAG, "invoking android.os.ServiceManager.getService(\"batteryinfo\")");
-	          }
-	          IBinder serviceBinder = (IBinder) methodGetService.invoke(serviceManagerClass, paramsGetService); 
+            ClassLoader cl = context.getClassLoader();
 
-	          if (CommonLogSettings.DEBUG)
-	          {
-	        	  Log.i(TAG, "android.os.ServiceManager.getService(\"batteryinfo\") returned a service binder");
-	          }
-	          
-	          // now we have a binder. Let's us that on IBatteryStats.Stub.asInterface
-	          // to get an IBatteryStats
-	          // Note the $-syntax here as Stub is a nested class
-	          @SuppressWarnings("rawtypes")
-			  Class iBatteryStatsStub = cl.loadClass("com.android.internal.app.IBatteryStats$Stub");
+            m_ClassDefinition = cl.loadClass("com.android.internal.os.BatteryStatsImpl");
 
-	          //Parameters Types
-	          @SuppressWarnings("rawtypes")
-			  Class[] paramTypesAsInterface= new Class[1];
-	          paramTypesAsInterface[0]= IBinder.class;
+            // enumerate some data
+//            dumpClass(m_ClassDefinition);
+//            Class iBatteryStatsUid = cl.loadClass("com.android.internal.os.BatteryStatsImpl$Uid");
+//            dumpClass(iBatteryStatsUid);
 
-	          @SuppressWarnings("unchecked")
-			  Method methodAsInterface = iBatteryStatsStub.getMethod("asInterface", paramTypesAsInterface);
+            // get the IBinder to the "batteryinfo" service
+            @SuppressWarnings("rawtypes")
+            Class serviceManagerClass = cl.loadClass("android.os.ServiceManager");
 
-	          // Parameters
-	          Object[] paramsAsInterface= new Object[1];
-	          paramsAsInterface[0] = serviceBinder;
-	          
-	          if (CommonLogSettings.DEBUG)
-	          {
-	        	  Log.i(TAG, "invoking com.android.internal.app.IBatteryStats$Stub.asInterface");
-	          }
-	          Object iBatteryStatsInstance = methodAsInterface.invoke(iBatteryStatsStub, paramsAsInterface);
-	          
-	          // and finally we call getStatistics from that IBatteryStats to obtain a Parcel
-	          @SuppressWarnings("rawtypes")
-			  Class iBatteryStats = cl.loadClass("com.android.internal.app.IBatteryStats");
-	          
-	          @SuppressWarnings("unchecked")
-	          Method methodGetStatistics = iBatteryStats.getMethod("getStatistics");
-	          
-	          if (CommonLogSettings.DEBUG)
-	          {
-	        	  Log.i(TAG, "invoking getStatistics");
-	          }
-	          byte[] data = (byte[]) methodGetStatistics.invoke(iBatteryStatsInstance);
-	          
-	          if (CommonLogSettings.DEBUG)
-	          {
-	        	  Log.i(TAG, "retrieving parcel");
-	          }
-	          
-	          Parcel parcel = Parcel.obtain();
-	          parcel.unmarshall(data, 0, data.length);
-	          parcel.setDataPosition(0);
-	          
-	          @SuppressWarnings("rawtypes")
-			  Class batteryStatsImpl = cl.loadClass("com.android.internal.os.BatteryStatsImpl");
+            // parameter types
+            @SuppressWarnings("rawtypes")
+            Class[] paramTypesGetService= new Class[1];
+            paramTypesGetService[0]= String.class;
 
-	          if (CommonLogSettings.DEBUG)
-	          {
-	        	  Log.i(TAG, "reading CREATOR field");
-	          }
-	          Field creatorField = batteryStatsImpl.getField("CREATOR");
-	          
-	          // From here on we don't need reflection anymore
-	          @SuppressWarnings("rawtypes")
-			  Parcelable.Creator batteryStatsImpl_CREATOR = (Parcelable.Creator) creatorField.get(batteryStatsImpl); 
-	          
-	          m_Instance = batteryStatsImpl_CREATOR.createFromParcel(parcel);        
+            @SuppressWarnings("unchecked")
+            Method methodGetService = serviceManagerClass.getMethod("getService", paramTypesGetService);
+
+            String service = "";
+            if (Build.VERSION.SDK_INT >= 19)
+            {
+              // kitkat and following
+              service = "batterystats";
+            }
+            else
+            {
+              service = "batteryinfo";
+            }
+            // parameters
+            Object[] paramsGetService= new Object[1];
+            paramsGetService[0] = service;
+
+            if (CommonLogSettings.DEBUG)
+            {
+              Log.i(TAG, "invoking android.os.ServiceManager.getService(\"" + service + "\")");
+            }
+            IBinder serviceBinder = (IBinder) methodGetService.invoke(serviceManagerClass, paramsGetService);
+
+            if (CommonLogSettings.DEBUG)
+            {
+              Log.i(TAG, "android.os.ServiceManager.getService(\"" + service + "\") returned a service binder");
+            }
+
+            // now we have a binder. Let's us that on IBatteryStats.Stub.asInterface
+            // to get an IBatteryStats
+            // Note the $-syntax here as Stub is a nested class
+            @SuppressWarnings("rawtypes")
+            Class iBatteryStatsStub = cl.loadClass("com.android.internal.app.IBatteryStats$Stub");
+
+            //Parameters Types
+            @SuppressWarnings("rawtypes")
+            Class[] paramTypesAsInterface= new Class[1];
+            paramTypesAsInterface[0]= IBinder.class;
+
+            @SuppressWarnings("unchecked")
+            Method methodAsInterface = iBatteryStatsStub.getMethod("asInterface", paramTypesAsInterface);
+
+            // Parameters
+            Object[] paramsAsInterface= new Object[1];
+            paramsAsInterface[0] = serviceBinder;
+
+            if (CommonLogSettings.DEBUG)
+            {
+              Log.i(TAG, "invoking com.android.internal.app.IBatteryStats$Stub.asInterface");
+            }
+            Object iBatteryStatsInstance = methodAsInterface.invoke(iBatteryStatsStub, paramsAsInterface);
+
+            // and finally we call getStatistics from that IBatteryStats to obtain a Parcel
+            @SuppressWarnings("rawtypes")
+            Class iBatteryStats = cl.loadClass("com.android.internal.app.IBatteryStats");
+
+            @SuppressWarnings("unchecked")
+            Method methodGetStatistics = iBatteryStats.getMethod("getStatistics");
+
+            if (CommonLogSettings.DEBUG)
+            {
+              Log.i(TAG, "invoking getStatistics");
+            }
+            byte[] data = (byte[]) methodGetStatistics.invoke(iBatteryStatsInstance);
+
+            if (CommonLogSettings.DEBUG)
+            {
+              Log.i(TAG, "retrieving parcel");
+            }
+
+            Parcel parcel = Parcel.obtain();
+            parcel.unmarshall(data, 0, data.length);
+            parcel.setDataPosition(0);
+
+            @SuppressWarnings("rawtypes")
+            Class batteryStatsImpl = cl.loadClass("com.android.internal.os.BatteryStatsImpl");
+
+            if (CommonLogSettings.DEBUG)
+            {
+              Log.i(TAG, "reading CREATOR field");
+            }
+            Field creatorField = batteryStatsImpl.getField("CREATOR");
+
+            // From here on we don't need reflection anymore
+            @SuppressWarnings("rawtypes")
+            Parcelable.Creator batteryStatsImpl_CREATOR = (Parcelable.Creator) creatorField.get(batteryStatsImpl);
+
+            m_Instance = batteryStatsImpl_CREATOR.createFromParcel(parcel);
+            m_lastError = "";
 	    }
 		catch( Exception e )
 		{
-			if (e instanceof InvocationTargetException && e.getCause() != null) {
-				Log.e(TAG, "An exception occured in BatteryStatsProxy(). Message: " + e.getCause().getMessage());
-			} else {
+			if (e instanceof InvocationTargetException && e.getCause() != null)
+			{
+   				Log.e(TAG, "An exception occured in BatteryStatsProxy(). Message: " + e.getCause().getMessage());
+   				m_lastError = e.getCause().getMessage();
+			}
+			else
+			{
 				Log.e(TAG, "An exception occured in BatteryStatsProxy(). Message: " + e.getMessage());
+                m_lastError = e.getMessage();
 			}
 	    	m_Instance = null;
 	    	
 	    }    
 	}
+
+	protected void dumpClass(Class someClass)
+    {
+        List<Method> result = new ArrayList<Method>();
+
+        Class clazz = someClass;
+        while (clazz != null) {
+            for (Method method : clazz.getDeclaredMethods()) {
+                int modifiers = method.getModifiers();
+                if (Modifier.isPublic(modifiers) || Modifier.isProtected(modifiers)) {
+                    result.add(method);
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+
+        Log.i(TAG, "Attributes of " + someClass.getName());
+
+        for (int i=0; i < result.size(); i++)
+        {
+            Method method = result.get(i);
+            Log.i(TAG, someClass.getName() + "." + method.getName());
+        }
+
+    }
 
 	protected BatteryStatsProxy(Context context, boolean dummy) // just need a different signature
 	{
@@ -313,13 +384,13 @@ public class BatteryStatsProxy
 
 			if (CommonLogSettings.DEBUG)
 			{
-				Log.i(TAG, "invoking android.os.ServiceManager.getService(\"batteryinfo\")");
+				Log.i(TAG, "invoking android.os.ServiceManager.getService(\"" + service + "\")");
 			}
 			IBinder serviceBinder = (IBinder) methodGetService.invoke(serviceManagerClass, paramsGetService);
 
 			if (CommonLogSettings.DEBUG)
 			{
-				Log.i(TAG, "android.os.ServiceManager.getService(\"batteryinfo\") returned a service binder");
+				Log.i(TAG, "android.os.ServiceManager.getService(\"" + service + "\") returned a service binder");
 			}
 
 			// now we have a binder. Let's us that on IBatteryStats.Stub.asInterface
@@ -377,8 +448,11 @@ public class BatteryStatsProxy
                     // we want to access MemoryFile.getSize(pfd.getFileDescriptor()) but this methos id hidden
                     Method methodGetSize = MemoryFile.class.getMethod("getSize", paramTypes);
                     methodGetSize.setAccessible(true);
+
                     int size = (int) methodGetSize.invoke(null, /* null = static method */ pfd.getFileDescriptor());
+
                     byte[] data = readFully(fis, size);
+
                     Parcel parcel = Parcel.obtain();
                     parcel.unmarshall(data, 0, data.length);
                     parcel.setDataPosition(0);
@@ -394,21 +468,28 @@ public class BatteryStatsProxy
                     Parcelable.Creator batteryStatsImpl_CREATOR = (Parcelable.Creator) creatorField.get(batteryStatsImpl);
 
                     m_Instance = batteryStatsImpl_CREATOR.createFromParcel(parcel);
+                    m_lastError = "";
 
                 }
                 catch (IOException e)
                 {
                     Log.w(TAG, "Unable to read statistics stream", e);
+                    m_lastError = "Unable to read statistics stream: " + e.getMessage();
                 }
             }
 
 		}
 		catch( Exception e )
 		{
-			if (e instanceof InvocationTargetException && e.getCause() != null) {
+			if (e instanceof InvocationTargetException && e.getCause() != null)
+			{
 				Log.e(TAG, "An exception occured in BatteryStatsProxy(). Message: " + e.getCause().getMessage());
-			} else {
+                m_lastError = e.getCause().getMessage();
+			}
+			else
+			{
 				Log.e(TAG, "An exception occured in BatteryStatsProxy(). Message: " + e.getMessage());
+                m_lastError = e.getMessage();
 			}
 			m_Instance = null;
 
@@ -1371,11 +1452,13 @@ public class BatteryStatsProxy
 								// call public long getTotalTimeLocked(long elapsedRealtimeUs, int which)
 					        	Long value = (Long) computeRunTimeLocked.invoke(timer, params);
 					        	ret += value;
-					        	
-					        	Log.i("BBS.Sensors",
-					        			"UID=" + uid 
-					        			+ ", Sensor=" +decodeSensor(handle) + " (" + handle + ") " 
-					        					+ ", time=" + DateUtils.formatDuration((long)value/1000) + " (" + value + ")");
+                                if (CommonLogSettings.DEBUG)
+                                {
+                                    Log.i("BBS.Sensors",
+                                            "UID=" + uid
+                                                    + ", Sensor=" + decodeSensor(handle) + " (" + handle + ") "
+                                                    + ", time=" + DateUtils.formatDuration((long) value / 1000) + " (" + value + ")");
+                                }
 						    }
 						}
 	        		}
@@ -1419,11 +1502,13 @@ public class BatteryStatsProxy
 								// call public long getTotalTimeLocked(long elapsedRealtimeUs, int which)
 					        	Long value = (Long) computeRunTimeLocked.invoke(timer, params);
 					        	ret += value;
-					        	
-					        	Log.i("BBS.Sensors",
-					        			"UID=" + uid 
-					        			+ ", Sensor=" +decodeSensor(handle) + " (" + handle + ") " 
-					        					+ ", time=" + DateUtils.formatDuration((long)value/1000) + " (" + value + ")");
+                                if (CommonLogSettings.DEBUG)
+                                {
+                                    Log.i("BBS.Sensors",
+                                            "UID=" + uid
+                                                    + ", Sensor=" + decodeSensor(handle) + " (" + handle + ") "
+                                                    + ", time=" + DateUtils.formatDuration((long) value / 1000) + " (" + value + ")");
+                                }
 						    }
 						}
 	        			
@@ -1521,12 +1606,13 @@ public class BatteryStatsProxy
 								// call public long getTotalTimeLocked(long elapsedRealtimeUs, int which)
 					        	Long value = (Long) computeRunTimeLocked.invoke(timer, params);
 					        	uidTotalSensorTime += value;
-					        	
-					        	Log.i("BBS.Sensors",
-					        			"UID=" + uid 
-					        			+ ", Sensor=" +decodeSensor(handle) + " (" + handle + ") " 
-					        					+ ", time=" + DateUtils.formatDuration((long)value/1000) + " (" + value + ")");
-					        	
+                                if (CommonLogSettings.DEBUG)
+                                {
+                                    Log.i("BBS.Sensors",
+                                            "UID=" + uid
+                                                    + ", Sensor=" + decodeSensor(handle) + " (" + handle + ") "
+                                                    + ", time=" + DateUtils.formatDuration((long) value / 1000) + " (" + value + ")");
+                                }
 					        	Sensor lookup = findSensor(context, handle);
 					        	
 					        	String sensorText = "";
@@ -1605,12 +1691,13 @@ public class BatteryStatsProxy
 								// call public long getTotalTimeLocked(long elapsedRealtimeUs, int which)
 					        	Long value = (Long) computeRunTimeLocked.invoke(timer, params);
 					        	uidTotalSensorTime += value;
-					        	
-					        	Log.i("BBS.Sensors",
-					        			"UID=" + uid 
-					        			+ ", Sensor=" +decodeSensor(handle) + " (" + handle + ") " 
-					        					+ ", time=" + DateUtils.formatDuration((long)value/1000) + " (" + value + ")");
-					        	
+                                if (CommonLogSettings.DEBUG)
+                                {
+                                    Log.i("BBS.Sensors",
+                                            "UID=" + uid
+                                                    + ", Sensor=" + decodeSensor(handle) + " (" + handle + ") "
+                                                    + ", time=" + DateUtils.formatDuration((long) value / 1000) + " (" + value + ")");
+                                }
 					        	Sensor lookup = findSensor(context, handle);
 					        	
 					        	String sensorText = "";
@@ -1734,14 +1821,17 @@ public class BatteryStatsProxy
 				retVal = sensor;
 				return retVal;
 			}
-    		if (Build.VERSION.SDK_INT >= 21)
-    		{
-    			Log.i(TAG, "name=" + sensor.getName() + ", handle=" + handle+ ", wakeup=" + sensor.isWakeUpSensor() + ", type=" + sensor.getStringType());
-    		}
-    		else
-    		{
-    			Log.i(TAG, "name=" + sensor.getName()  + ", handle=" + handle);
-    		}
+
+			if (CommonLogSettings.DEBUG)
+            {
+                if (Build.VERSION.SDK_INT >= 21)
+                {
+                    Log.i(TAG, "name=" + sensor.getName() + ", handle=" + handle + ", wakeup=" + sensor.isWakeUpSensor() + ", type=" + sensor.getStringType());
+                } else
+                {
+                    Log.i(TAG, "name=" + sensor.getName() + ", handle=" + handle);
+                }
+            }
     	}
     	
     	return null;
@@ -2529,10 +2619,10 @@ public class BatteryStatsProxy
 						{
 							myWl = new Wakelock(entropy, iWakeType, wakelockEntry.getKey(), wakelockTime, uSec / 1000, wakelockCount);
 						}
-						
-						// opt for lazy loading: do no populate UidInfo, just uid. UidInfo will be fetched on demand
-						myWl.setUid(uid);
-						myStats.add(myWl);
+
+                        myStats.add(myWl);
+                        // opt for lazy loading: do no populate UidInfo, just uid. UidInfo will be fetched on demand
+                        myWl.setUid(uid);
 
 //						Log.d(TAG, "Wakelocks: Process = " + wakelockEntry.getKey() + " wakelock [s] " + wakelockTime + ", count " + wakelockCount);
 		            }
@@ -2579,10 +2669,16 @@ public class BatteryStatsProxy
 			@SuppressWarnings("rawtypes")
 			Class iBatteryStats = cl.loadClass("com.android.internal.os.BatteryStatsImpl");
 
+			Field fKernelWakelockStats = iBatteryStats.getDeclaredField("mTmpWakelockStats");
+			fKernelWakelockStats.setAccessible(true);
+
 			// Process wake lock usage
 			Method methodGetKernelWakelockStats = iBatteryStats.getMethod("getKernelWakelockStats");
-			
-			Class classSamplingTimer = cl.loadClass("com.android.internal.os.BatteryStatsImpl$SamplingTimer");
+            // Map of String, BatteryStatsImpl.SamplingTimer
+//            Map<String, ? extends Object> kernelWakelockStats2 = (Map<String, ? extends Object>)  fKernelWakelockStats.get(m_Instance);
+
+
+            Class classSamplingTimer = cl.loadClass("com.android.internal.os.BatteryStatsImpl$SamplingTimer");
 
 			Field currentReportedCount  		= classSamplingTimer.getDeclaredField("mCurrentReportedCount");
 			Field currentReportedTotalTime  	= classSamplingTimer.getDeclaredField("mCurrentReportedTotalTime");

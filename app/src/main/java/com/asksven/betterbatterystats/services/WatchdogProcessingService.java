@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-14 asksven
+ * Copyright (C) 2011-2018 asksven
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.IBinder;
 import android.preference.PreferenceManager;
-import android.support.v7.app.NotificationCompat;
+import android.support.v4.app.NotificationCompat;
 import android.util.Log;
 
 import com.asksven.android.common.privateapiproxies.BatteryStatsProxy;
@@ -38,7 +38,7 @@ import com.asksven.betterbatterystats.appanalytics.Events;
 import com.asksven.betterbatterystats.data.Reference;
 import com.asksven.betterbatterystats.data.ReferenceStore;
 import com.asksven.betterbatterystats.data.StatsProvider;
-import com.asksven.betterbatterystats.widgetproviders.LargeWidgetProvider;
+import com.asksven.betterbatterystats.widgetproviders.AppWidget;
 
 import java.util.ArrayList;
 
@@ -180,7 +180,7 @@ public class WatchdogProcessingService extends IntentService
 					    	    (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 					    	// Builds an anonymous Notification object from the builder, and
 					    	// passes it to the NotificationManager
-					    	mNotificationManager.notify(EventWatcherService.NOTFICATION_ID, builder.build());
+					    	mNotificationManager.notify(EventWatcherService.NOTIFICATION_ID, builder.build());
 
 						}
 					}
@@ -193,7 +193,7 @@ public class WatchdogProcessingService extends IntentService
 				}
 			
 				// Build the intent to update the widget
-				Intent intentRefreshWidgets = new Intent(LargeWidgetProvider.WIDGET_UPDATE);
+				Intent intentRefreshWidgets = new Intent(AppWidget.WIDGET_UPDATE);
 				this.sendBroadcast(intentRefreshWidgets);
 			}
 			
